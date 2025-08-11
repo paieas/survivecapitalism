@@ -26,7 +26,14 @@ const SignOutIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5
 
 // --- Firebase Configuration ---
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'finance-copilot-default';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const firebaseConfig =  typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {apiKey: "AIzaSyB7q_py7uyfSSXmXgymeeX7SCHCSeojGxw",
+  authDomain: "get-out-of-capitalistic-jail.firebaseapp.com",
+  projectId: "get-out-of-capitalistic-jail",
+  storageBucket: "get-out-of-capitalistic-jail.firebasestorage.app",
+  messagingSenderId: "112263344335",
+  appId: "1:112263344335:web:89d4010f3bf19bab9f07ba",
+  measurementId: "G-8J17CLN2JW"
+};
 
 // --- Main App Component ---
 export default function App() {
