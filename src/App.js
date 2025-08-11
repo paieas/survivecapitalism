@@ -177,8 +177,8 @@ function AuthManager({ user, auth, logEvent }) {
     const handleSignOut = async () => {
         const oldUserEmail = user.email;
         try {
+            await logEvent(`Signed out from ${oldUserEmail}.`);
             await signOut(auth);
-            logEvent(`Signed out from ${oldUserEmail}.`);
         } catch (error) {
             console.error("Sign out failed:", error);
         }
