@@ -472,9 +472,6 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
     );
 }
 
-// ... (Rest of the components: Modal, DebtManager, DebtStrategyView, AiAnalyst, BillShockPlanner, HistoryView remain the same)
-// NOTE: For brevity, the other components are omitted here but are unchanged from the previous version. They are included in the full code block.
-
 function Modal({ isOpen, onClose, onConfirm, title, children }) {
     if (!isOpen) return null;
 
@@ -587,7 +584,7 @@ function DebtStrategyView({ debts }) {
     const [extraPayment, setExtraPayment] = useState(100);
 
     const calculatePayoff = (debts, strategy, extraPayment) => {
-        if (!debts || debts.length === 0) return { months: 0, totalInterest: 0, totalPaid: 0, plan: [] };
+        if (!debts || debts.length === 0) return { months: 0, totalInterest: 0 };
 
         let localDebts = JSON.parse(JSON.stringify(debts));
         let sortedDebts;
@@ -745,7 +742,7 @@ function AiAnalyst({ budgetItems, logEvent }) {
         setIsLoading(true);
 
         const budgetContext = JSON.stringify(budgetItems.map(({ id, ...rest }) => rest));
-        const prompt = `You are a helpful financial analyst. Based on the following budget data (as a JSON string), please answer the user's question. Be concise and provide actionable advice. The first column is the category.\n\nBudget Data:\n${budgetContext}\n\nQuestion: ${input}`;
+        const prompt = `You are a helpful financial analyst. Based on the following budget data (as a JSON string), please answer the user's question. Be concise and provide actionable advice. The data contains 'Category' and 'Period' fields for context.\n\nBudget Data:\n${budgetContext}\n\nQuestion: ${input}`;
 
         try {
             const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
@@ -759,7 +756,16 @@ function AiAnalyst({ budgetItems, logEvent }) {
                 body: JSON.stringify(payload)
             });
             
-            if (!response.ok) throw new Error(`API request failed with status ${response.status}`);
+            if (!response.ok) {
+                let errorData;
+                try {
+                    errorData = await response.json();
+                } catch (e) {
+                    throw new Error(`API request failed with status ${response.status}`);
+                }
+                const errorMessage = errorData?.error?.message || "An unknown API error occurred.";
+                throw new Error(errorMessage);
+            }
 
             const result = await response.json();
             const aiText = result?.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't process that request.";
@@ -768,7 +774,8 @@ function AiAnalyst({ budgetItems, logEvent }) {
 
         } catch (error) {
             console.error("Error calling Gemini API:", error);
-            const errorMessage = { role: 'ai', text: "There was an error connecting to the AI. Please try again." };
+            const errorMessageText = `There was an error connecting to the AI: ${error.message}`;
+            const errorMessage = { role: 'ai', text: errorMessageText };
             setMessages(prev => [...prev, errorMessage]);
         } finally {
             setIsLoading(false);
