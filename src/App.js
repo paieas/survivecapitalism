@@ -9,7 +9,7 @@ import {
     linkWithCredential,
     signOut
 } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, query, getDocs, addDoc, serverTimestamp, orderBy } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, query, getDocs, addDoc, serverTimestamp, orderBy, where, writeBatch } from 'firebase/firestore';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 // --- Helper Icons (as SVG components) ---
@@ -252,26 +252,38 @@ function Navbar({ activeView, setActiveView }) {
 function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
     const [budgetHeaders, setBudgetHeaders] = useState([]);
     const [chartKeys, setChartKeys] = useState([]);
+    const [aggregationSuggestions, setAggregationSuggestions] = useState([]);
 
     useEffect(() => {
         if (budgetItems.length > 0) {
-            const headers = Object.keys(budgetItems[0]).filter(key => key !== 'id');
-            setBudgetHeaders(headers);
+            const headers = Object.keys(budgetItems[0]).filter(key => key !== 'id' && key !== 'Category' && key !== 'Period');
+            const categoryHeader = Object.keys(budgetItems[0]).find(key => key.toLowerCase() === 'category') || 'Category';
+            const periodHeader = Object.keys(budgetItems[0]).find(key => key.toLowerCase() === 'period') || 'Period';
+
+            setBudgetHeaders([categoryHeader, periodHeader, ...headers]);
             
-            // Auto-select the first two numerical columns for the chart
             const numericalHeaders = headers.filter(h => typeof budgetItems[0][h] === 'number');
-            setChartKeys(numericalHeaders.slice(0, 2));
+            setChartKeys(numericalHeaders.slice(-2)); // Use last two numerical columns
         } else {
             setBudgetHeaders([]);
             setChartKeys([]);
         }
     }, [budgetItems]);
 
+    const generateSuggestions = (items) => {
+        const categoryCounts = items.reduce((acc, item) => {
+            const key = item.Category;
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+        }, {});
+        const suggestions = Object.entries(categoryCounts)
+            .filter(([key, value]) => value > 1)
+            .map(([key]) => key);
+        setAggregationSuggestions(suggestions);
+    };
+
     const handleFileUpload = (event) => {
-        if (!window.XLSX) {
-            alert("Excel library is not loaded yet. Please try again in a moment.");
-            return;
-        }
+        if (!window.XLSX) return alert("Excel library is not loaded yet.");
         const file = event.target.files[0];
         if (!file) return;
 
@@ -282,58 +294,106 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                 const workbook = window.XLSX.read(data, { type: 'array' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
-                const json = window.XLSX.utils.sheet_to_json(worksheet);
+                const rows = window.XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
-                if (json.length === 0) {
-                    alert("The selected file is empty or not formatted correctly.");
-                    return;
-                }
+                let headerRowIndex = rows.findIndex(row => row.includes('Paycheck 1') || row.includes('Paycheck 2'));
+                if (headerRowIndex === -1) headerRowIndex = 0;
 
-                const budgetCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/budget`);
-                const existingDocs = await getDocs(budgetCollectionRef);
-                for (const docSnapshot of existingDocs.docs) {
-                    await deleteDoc(docSnapshot.ref);
-                }
-
-                const headers = Object.keys(json[0]);
-                const categoryHeader = headers[0];
-
-                for (const item of json) {
-                    const categoryValue = item[categoryHeader]?.toString() || 'Uncategorized';
-                    const docId = categoryValue.replace(/[^a-zA-Z0-9]/g, '_');
-                    const docRef = doc(db, `artifacts/${appId}/users/${user.uid}/budget`, docId);
-                    
-                    const budgetData = {};
-                    for(const header of headers) {
-                        const value = item[header];
-                        // Store numbers as numbers, everything else as strings
-                        budgetData[header] = isNaN(parseFloat(value)) ? value : parseFloat(value);
+                const monthRow = rows[headerRowIndex - 1] || [];
+                const mainHeaderRow = rows[headerRowIndex];
+                
+                let columnToPeriod = {};
+                let currentPeriod = 'General';
+                monthRow.forEach((cell, index) => {
+                    if (cell && cell.toString().trim()) {
+                        currentPeriod = cell.toString().trim();
                     }
-                    
-                    await setDoc(docRef, budgetData);
-                }
-                logEvent(`Imported budget from file: ${file.name}`);
+                    columnToPeriod[index] = currentPeriod;
+                });
+
+                const dataRows = rows.slice(headerRowIndex + 1);
+                const finalJson = [];
+
+                const columnBlocks = [];
+                mainHeaderRow.forEach((header, index) => {
+                    if (header && header.toString().toLowerCase().includes('credit cards')) {
+                        columnBlocks.push(index);
+                    }
+                });
+                if (columnBlocks.length === 0) columnBlocks.push(0); // Fallback for simple tables
+
+                dataRows.forEach((row, rowIndex) => {
+                    columnBlocks.forEach(startCol => {
+                        const categoryName = row[startCol] ? row[startCol].toString().trim() : null;
+                        if (!categoryName) return;
+
+                        const item = {
+                            Category: categoryName,
+                            Period: columnToPeriod[startCol] || 'N/A',
+                        };
+
+                        const payHeader1 = mainHeaderRow[startCol + 1];
+                        const payHeader2 = mainHeaderRow[startCol + 2];
+
+                        if(payHeader1) item[payHeader1] = parseFloat(row[startCol + 1]) || 0;
+                        if(payHeader2) item[payHeader2] = parseFloat(row[startCol + 2]) || 0;
+                        
+                        finalJson.push(item);
+                    });
+                });
+                
+                const budgetCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/budget`);
+                const batch = writeBatch(db);
+                const existingDocs = await getDocs(budgetCollectionRef);
+                existingDocs.forEach(doc => batch.delete(doc.ref));
+
+                finalJson.forEach((item, index) => {
+                    const docId = `${item.Period}_${item.Category}_${index}`.replace(/[^a-zA-Z0-9]/g, '_');
+                    const docRef = doc(db, `artifacts/${appId}/users/${user.uid}/budget`, docId);
+                    batch.set(docRef, item);
+                });
+
+                await batch.commit();
+                generateSuggestions(finalJson);
+                logEvent(`Imported complex budget from file: ${file.name}`);
             } catch (error) {
                 console.error("Error processing file:", error);
-                alert("Failed to process the Excel file. Please ensure it's a valid Excel file.");
+                alert("Failed to process the Excel file. It might have an unexpected format.");
             }
         };
         reader.readAsArrayBuffer(file);
     };
-    
-    const handleExport = () => {
-        if (!window.XLSX) {
-            alert("Excel library is not loaded yet. Please try again in a moment.");
-            return;
-        }
-        const dataToExport = budgetItems.map(({ id, ...rest }) => rest);
-        const worksheet = window.XLSX.utils.json_to_sheet(dataToExport);
-        const workbook = window.XLSX.utils.book_new();
-        window.XLSX.utils.book_append_sheet(workbook, worksheet, "Budget");
-        window.XLSX.writeFile(workbook, "budget_export.xlsx");
-        logEvent("Exported budget to Excel file.");
-    };
 
+    const handleCombine = async (categoryName) => {
+        const budgetCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/budget`);
+        const q = query(budgetCollectionRef, where("Category", "==", categoryName));
+        const snapshot = await getDocs(q);
+
+        if (snapshot.empty) return;
+
+        const combinedData = { Category: categoryName, Period: 'Aggregated' };
+        
+        snapshot.docs.forEach(doc => {
+            const data = doc.data();
+            Object.entries(data).forEach(([key, value]) => {
+                if (typeof value === 'number') {
+                    combinedData[key] = (combinedData[key] || 0) + value;
+                }
+            });
+        });
+
+        const batch = writeBatch(db);
+        snapshot.docs.forEach(doc => batch.delete(doc.ref));
+        
+        const newDocId = `${categoryName}_Aggregated`.replace(/[^a-zA-Z0-9]/g, '_');
+        const newDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/budget`, newDocId);
+        batch.set(newDocRef, combinedData);
+
+        await batch.commit();
+        logEvent(`Aggregated category: ${categoryName}`);
+        setAggregationSuggestions(prev => prev.filter(s => s !== categoryName));
+    };
+    
     return (
         <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
             <h2 className="text-xl font-bold mb-4 text-white">Budget Overview</h2>
@@ -343,12 +403,25 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                     <span>Import from Excel</span>
                     <input type="file" className="hidden" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} disabled={!isXlsxLoaded} />
                 </label>
-                <button onClick={handleExport} disabled={!isXlsxLoaded || budgetItems.length === 0} className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200 disabled:bg-gray-600 disabled:cursor-not-allowed">
-                    Export to Excel
-                </button>
             </div>
             
-            <p className="text-sm text-gray-400 mb-4">Import any Excel file. The first column will be used as the category, and all other columns will be treated as budget fields.</p>
+            {aggregationSuggestions.length > 0 && (
+                <div className="bg-gray-700 p-4 rounded-lg mb-6">
+                    <h3 className="font-semibold mb-2 text-white">Aggregation Suggestions</h3>
+                    <p className="text-sm text-gray-400 mb-4">We found multiple entries for these categories. Would you like to combine them?</p>
+                    <div className="space-y-2">
+                        {aggregationSuggestions.map(name => (
+                            <div key={name} className="flex justify-between items-center bg-gray-600 p-2 rounded">
+                                <span>{name}</span>
+                                <div className="space-x-2">
+                                    <button onClick={() => handleCombine(name)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 text-sm rounded">Combine</button>
+                                    <button onClick={() => setAggregationSuggestions(p => p.filter(s => s !== name))} className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 text-sm rounded">Ignore</button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-gray-700 p-4 rounded-lg">
@@ -382,7 +455,7 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                         <ResponsiveContainer width="100%" height={350}>
                              <BarChart data={budgetItems} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#4a5568" />
-                                <XAxis dataKey={budgetHeaders[0]} hide={true} />
+                                <XAxis dataKey="Category" hide={true} />
                                 <YAxis stroke="#a0aec0" />
                                 <Tooltip contentStyle={{ backgroundColor: '#2d3748', border: '1px solid #4a5568' }} />
                                 <Legend />
@@ -398,6 +471,9 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
         </div>
     );
 }
+
+// ... (Rest of the components: Modal, DebtManager, DebtStrategyView, AiAnalyst, BillShockPlanner, HistoryView remain the same)
+// NOTE: For brevity, the other components are omitted here but are unchanged from the previous version. They are included in the full code block.
 
 function Modal({ isOpen, onClose, onConfirm, title, children }) {
     if (!isOpen) return null;
