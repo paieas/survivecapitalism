@@ -250,6 +250,23 @@ function Navbar({ activeView, setActiveView }) {
 }
 
 function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
+    const [budgetHeaders, setBudgetHeaders] = useState([]);
+    const [chartKeys, setChartKeys] = useState([]);
+
+    useEffect(() => {
+        if (budgetItems.length > 0) {
+            const headers = Object.keys(budgetItems[0]).filter(key => key !== 'id');
+            setBudgetHeaders(headers);
+            
+            // Auto-select the first two numerical columns for the chart
+            const numericalHeaders = headers.filter(h => typeof budgetItems[0][h] === 'number');
+            setChartKeys(numericalHeaders.slice(0, 2));
+        } else {
+            setBudgetHeaders([]);
+            setChartKeys([]);
+        }
+    }, [budgetItems]);
+
     const handleFileUpload = (event) => {
         if (!window.XLSX) {
             alert("Excel library is not loaded yet. Please try again in a moment.");
@@ -267,24 +284,38 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                 const worksheet = workbook.Sheets[sheetName];
                 const json = window.XLSX.utils.sheet_to_json(worksheet);
 
+                if (json.length === 0) {
+                    alert("The selected file is empty or not formatted correctly.");
+                    return;
+                }
+
                 const budgetCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/budget`);
                 const existingDocs = await getDocs(budgetCollectionRef);
                 for (const docSnapshot of existingDocs.docs) {
                     await deleteDoc(docSnapshot.ref);
                 }
 
+                const headers = Object.keys(json[0]);
+                const categoryHeader = headers[0];
+
                 for (const item of json) {
-                    const category = item.Category || 'Uncategorized';
-                    const allocated = parseFloat(item.Allocated) || 0;
-                    const spent = parseFloat(item.Spent) || 0;
-                    const docId = category.replace(/[^a-zA-Z0-9]/g, '_');
+                    const categoryValue = item[categoryHeader]?.toString() || 'Uncategorized';
+                    const docId = categoryValue.replace(/[^a-zA-Z0-9]/g, '_');
                     const docRef = doc(db, `artifacts/${appId}/users/${user.uid}/budget`, docId);
-                    await setDoc(docRef, { category, allocated, spent });
+                    
+                    const budgetData = {};
+                    for(const header of headers) {
+                        const value = item[header];
+                        // Store numbers as numbers, everything else as strings
+                        budgetData[header] = isNaN(parseFloat(value)) ? value : parseFloat(value);
+                    }
+                    
+                    await setDoc(docRef, budgetData);
                 }
                 logEvent(`Imported budget from file: ${file.name}`);
             } catch (error) {
                 console.error("Error processing file:", error);
-                alert("Failed to process the Excel file. Please ensure it has 'Category', 'Allocated', and 'Spent' columns.");
+                alert("Failed to process the Excel file. Please ensure it's a valid Excel file.");
             }
         };
         reader.readAsArrayBuffer(file);
@@ -317,7 +348,7 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                 </button>
             </div>
             
-            <p className="text-sm text-gray-400 mb-4">Import an Excel file with columns: "Category", "Allocated", and "Spent". The existing budget will be replaced.</p>
+            <p className="text-sm text-gray-400 mb-4">Import any Excel file. The first column will be used as the category, and all other columns will be treated as budget fields.</p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-gray-700 p-4 rounded-lg">
@@ -326,24 +357,20 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                         <table className="w-full text-left">
                             <thead className="sticky top-0 bg-gray-700">
                                 <tr>
-                                    <th className="p-2">Category</th>
-                                    <th className="p-2">Allocated</th>
-                                    <th className="p-2">Spent</th>
-                                    <th className="p-2">Remaining</th>
+                                    {budgetHeaders.map(header => <th key={header} className="p-2 capitalize">{header}</th>)}
                                 </tr>
                             </thead>
                             <tbody>
                                 {budgetItems.length > 0 ? budgetItems.map(item => (
                                     <tr key={item.id} className="border-t border-gray-600">
-                                        <td className="p-2">{item.category}</td>
-                                        <td className="p-2 text-green-400">${item.allocated.toFixed(2)}</td>
-                                        <td className="p-2 text-red-400">${item.spent.toFixed(2)}</td>
-                                        <td className={`p-2 font-bold ${item.allocated - item.spent >= 0 ? 'text-blue-400' : 'text-orange-400'}`}>
-                                            ${(item.allocated - item.spent).toFixed(2)}
-                                        </td>
+                                        {budgetHeaders.map(header => (
+                                            <td key={`${item.id}-${header}`} className="p-2">
+                                                {typeof item[header] === 'number' ? `$${item[header].toFixed(2)}` : item[header]}
+                                            </td>
+                                        ))}
                                     </tr>
                                 )) : (
-                                    <tr><td colSpan="4" className="text-center p-4">No budget data. Please import a file.</td></tr>
+                                    <tr><td colSpan={budgetHeaders.length || 1} className="text-center p-4">No budget data. Please import a file.</td></tr>
                                 )}
                             </tbody>
                         </table>
@@ -351,16 +378,16 @@ function BudgetManager({ db, user, budgetItems, isXlsxLoaded, logEvent }) {
                 </div>
                  <div className="bg-gray-700 p-4 rounded-lg min-h-[300px]">
                      <h3 className="font-semibold mb-2">Spending Chart</h3>
-                     {budgetItems.length > 0 ? (
+                     {budgetItems.length > 0 && chartKeys.length > 0 ? (
                         <ResponsiveContainer width="100%" height={350}>
                              <BarChart data={budgetItems} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#4a5568" />
-                                <XAxis dataKey="category" hide={true} />
+                                <XAxis dataKey={budgetHeaders[0]} hide={true} />
                                 <YAxis stroke="#a0aec0" />
                                 <Tooltip contentStyle={{ backgroundColor: '#2d3748', border: '1px solid #4a5568' }} />
                                 <Legend />
-                                <Bar dataKey="spent" fill="#ef4444" name="Spent" />
-                                <Bar dataKey="allocated" fill="#22c55e" name="Allocated" />
+                                {chartKeys[0] && <Bar dataKey={chartKeys[0]} fill="#22c55e" name={chartKeys[0]} />}
+                                {chartKeys[1] && <Bar dataKey={chartKeys[1]} fill="#ef4444" name={chartKeys[1]} />}
                             </BarChart>
                         </ResponsiveContainer>
                      ) : (
@@ -641,8 +668,8 @@ function AiAnalyst({ budgetItems, logEvent }) {
         setInput('');
         setIsLoading(true);
 
-        const budgetContext = budgetItems.map(i => `${i.category}: Allocated $${i.allocated.toFixed(2)}, Spent $${i.spent.toFixed(2)}`).join('\n');
-        const prompt = `You are a helpful financial analyst. Based on the following budget data, please answer the user's question. Be concise and provide actionable advice. The data is structured as "Category: Allocated $X, Spent $Y".\n\nBudget Data:\n${budgetContext}\n\nQuestion: ${input}`;
+        const budgetContext = JSON.stringify(budgetItems.map(({ id, ...rest }) => rest));
+        const prompt = `You are a helpful financial analyst. Based on the following budget data (as a JSON string), please answer the user's question. Be concise and provide actionable advice. The first column is the category.\n\nBudget Data:\n${budgetContext}\n\nQuestion: ${input}`;
 
         try {
             const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
@@ -675,7 +702,7 @@ function AiAnalyst({ budgetItems, logEvent }) {
     return (
         <div className="bg-gray-800 rounded-lg p-6 shadow-lg h-[600px] flex flex-col">
             <h2 className="text-xl font-bold mb-2 text-white">AI Financial Analyst</h2>
-            <p className="text-xs text-gray-400 mb-4">Disclaimer: Only anonymized budget data (categories, allocated, and spent amounts) is sent for analysis. Your personal or debt information is never shared.</p>
+            <p className="text-xs text-gray-400 mb-4">Disclaimer: Only anonymized budget data (categories and values) is sent for analysis. Your personal or debt information is never shared.</p>
             <div className="flex-grow bg-gray-700 rounded-lg p-4 overflow-y-auto mb-4 space-y-4">
                 {messages.map((msg, index) => (
                     <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -749,8 +776,8 @@ function BillShockPlanner({ budgetItems, debts, logEvent }) {
         setIsLoading(true);
         setPlan(null);
 
-        const budgetContext = JSON.stringify(budgetItems);
-        const debtsContext = JSON.stringify(debts);
+        const budgetContext = JSON.stringify(budgetItems.map(({ id, ...rest }) => rest));
+        const debtsContext = JSON.stringify(debts.map(({ id, ...rest }) => rest));
         const newBillContext = JSON.stringify(bill);
         const constraints = excludedActions.length > 0 ? `Do not suggest the following actions: ${excludedActions.join(', ')}.` : '';
 
@@ -758,9 +785,9 @@ function BillShockPlanner({ budgetItems, debts, logEvent }) {
             You are a financial planning expert. A user has an unexpected bill and needs a safe plan to pay it off.
             Your goal is to create a plan that minimizes negative consequences like credit score damage.
             Prioritize delaying payments on bills with 'Low' sensitivity first, then 'Medium'. Avoid touching 'High' sensitivity bills unless absolutely necessary.
-            Also suggest temporary reductions in flexible budget categories like 'Groceries' or 'Entertainment'.
+            Also suggest temporary reductions in flexible budget categories.
 
-            Here is the user's financial data:
+            Here is the user's financial data as JSON strings:
             - Monthly Budget: ${budgetContext}
             - Existing Debts/Bills: ${debtsContext}
             - Unexpected Bill: ${newBillContext}
